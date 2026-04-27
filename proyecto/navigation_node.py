@@ -72,6 +72,12 @@ class NavigationNode(Node):
         self.y0 = 0.0
         self.theta0 = 0.0
         
+        # ===== ODOMETRY FILTERING =====
+        # Track last valid position to reject noise spikes
+        self.last_valid_x = 0.0
+        self.last_valid_y = 0.0
+        self.max_jump = 0.5  # Reject jumps > 0.5m as noise
+        
         # Final measurements
         self.d_front_final = None
         self.d_right_final = None
@@ -88,8 +94,20 @@ class NavigationNode(Node):
     # CALLBACKS DE ROS2
     # =======================================================
     def odom_callback(self, msg):
-        self.current_x = msg.pose.pose.position.x
-        self.current_y = msg.pose.pose.position.y
+        new_x = msg.pose.pose.position.x
+        new_y = msg.pose.pose.position.y
+        
+        # Filter out noise spikes: reject jumps > max_jump (0.5m)
+        jump = math.sqrt((new_x - self.last_valid_x)**2 + (new_y - self.last_valid_y)**2)
+        if jump > self.max_jump:
+            # Ignore this noisy reading, keep last valid position
+            return
+        
+        # Update valid position
+        self.current_x = new_x
+        self.current_y = new_y
+        self.last_valid_x = new_x
+        self.last_valid_y = new_y
         
         # Correct quaternion to 2D angle extraction for Z-axis rotation
         # For a quaternion (qx, qy, qz, qw) representing Z-axis rotation:
