@@ -15,6 +15,13 @@ from nav_msgs.msg import Path
 from proyecto.planning.scene_loader import load_scene
 from proyecto.planning.cspace import build_c_obstacles, build_classification_map
 from proyecto.planning.dijkstra import compute_full_path
+from proyecto.planning.path_generator import waypoints_to_configurations
+from proyecto.execution_utils import (
+    save_path_with_results,
+    estimate_position_from_odometry,
+    compute_qact_from_lidar,
+    normalize_angle_deg
+)
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -52,6 +59,22 @@ class NavigationNode(Node):
         # Variables para el planificador
         self.plan = []
         self.plan_index = 0
+        
+        # ===== NEW: STATE MACHINE FOR OPEN-LOOP EXECUTION =====
+        self.state = "IDLE"  # IDLE | PLANIFICANDO | EJECUTANDO | FINALIZANDO
+        self.configurations = []  # Full (x, y, theta) path
+        self.config_index = 0  # Current configuration index
+        self.scene = None  # Loaded scene
+        self.path_file = None  # Path output file
+        
+        # Initial position for final estimates
+        self.x0 = 0.0
+        self.y0 = 0.0
+        self.theta0 = 0.0
+        
+        # Final measurements
+        self.d_front_final = None
+        self.d_right_final = None
         
         # Timer (El loop de control corre 10 veces por segundo)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -282,110 +305,168 @@ class NavigationNode(Node):
     # BUCLE PRINCIPAL DE CONTROL
     # =======================================================
     def control_loop(self):
+        """
+        Main control loop implementing open-loop path execution.
+        
+        State machine:
+        IDLE        -> wait for command
+        PLANIFICANDO -> load scene, plan path, convert to configurations
+        EJECUTANDO   -> execute configurations sequentially (no corrections)
+        FINALIZANDO  -> read final LiDAR, compute qact, save results
+        """
+        
         if self.last_scan is None:
             return
-
-        # =====================================
-        # COMANDO 5: CARGAR + PLANIFICAR
-        # =====================================
-        if self.comando_activo == 5:
+        
+        # ===== COMMAND 5: LOAD + PLAN =====
+        if self.comando_activo == 5 and self.state == "IDLE":
             numero = self.parametros_comando[0]
-            self.get_logger().info(f"Loading scene {numero}...")
-
+            self.state = "PLANIFICANDO"
+            self.get_logger().info(f"PLANIFICANDO: Loading scene {numero}...")
+            
             try:
-                from ament_index_python.packages import get_package_share_directory
-
                 package_path = get_package_share_directory('proyecto')
                 ruta = os.path.join(package_path, 'data', f'Escena-Problema{numero}.txt')
-
+                
                 self.scene = load_scene(ruta)
-                self.get_logger().info(f"Scene loaded: {len(self.scene['obstacles'])} obstacles")
-
-            except Exception as e:
-                self.get_logger().error(f"Error loading scene: {e}")
-                self.comando_activo = None
-                return
-
-            self.get_logger().info("Planning path...")
-
-            try:
+                self.get_logger().info(f"  Scene: {len(self.scene['obstacles'])} obstacles")
+                
+                # Build C-space and plan
                 c_obs = build_c_obstacles(self.scene)
                 cmap = build_classification_map(self.scene, c_obs)
                 waypoints = compute_full_path(self.scene, cmap)
-
+                
+                if waypoints is None:
+                    raise Exception("No path found")
+                
+                # Get initial theta from scene
+                theta0 = self.scene['q0'][2] if len(self.scene['q0']) > 2 else 0.0
+                thetaf = self.scene['qf'][2] if len(self.scene['qf']) > 2 else 90.0
+                
+                # Convert waypoints to full configurations with headings
+                self.configurations = waypoints_to_configurations(waypoints, theta0, thetaf)
+                self.config_index = 0
+                
+                self.get_logger().info(f"  ✓ Path generated: {len(self.configurations)} configurations")
+                
+                # Save path file
+                self.path_file = os.path.join(package_path, f'path_Escena{numero}.txt')
+                save_path_with_results(self.configurations, self.path_file)
+                self.get_logger().info(f"  ✓ Path saved to {self.path_file}")
+                
+                # Store initial position for final estimates
+                self.x0 = self.current_x
+                self.y0 = self.current_y
+                self.theta0 = self.current_theta
+                
+                # Transition to execution
+                self.state = "EJECUTANDO"
+                self.comando_activo = 7  # Trigger execution
+                
             except Exception as e:
-                self.get_logger().error(f"Error planning: {e}")
+                self.get_logger().error(f"Error in PLANIFICANDO: {e}")
+                self.state = "IDLE"
                 self.comando_activo = None
-                return
-
-            if waypoints is None:
-                self.get_logger().error("No path found")
-                self.comando_activo = None
-                return
-
-            self.path = waypoints
-            self.indice_path = 0
-
-            self.get_logger().info(f"Path generated: {len(self.path)} waypoints")
-
-            self.comando_activo = 7
+            
             return
-
-
-        # =====================================
-        # ESTADO 7: EJECUTAR PATH
-        # =====================================
-        elif self.comando_activo == 7:
-            if self.indice_path >= len(self.path):
-                self.get_logger().info("✓ Trayectoria completada.")
-                self.cmd_pub.publish(Twist())  # detener robot
-                self.comando_activo = None
+        
+        # ===== STATE: EJECUTANDO (OPEN-LOOP EXECUTION) =====
+        if self.state == "EJECUTANDO" and self.comando_activo == 7:
+            
+            # Check if all configurations executed
+            if self.config_index >= len(self.configurations):
+                self.get_logger().info("✓ EJECUTANDO: All configurations completed!")
+                self.cmd_pub.publish(Twist())  # Stop robot
+                self.state = "FINALIZANDO"
                 return
-
-            x_target, y_target = self.path[self.indice_path]
-
-            dx = x_target - self.current_x
-            dy = y_target - self.current_y
-            dist = math.sqrt(dx**2 + dy**2)
-
-            # Waypoint reached (best effort: 20cm tolerance)
-            if dist < 0.2:
-                self.get_logger().info(
-                    f"  ✓ Waypoint {self.indice_path} alcanzado | "
-                    f"Pos: ({self.current_x:.2f}, {self.current_y:.2f}) | "
-                    f"θ: {math.degrees(self.current_theta):.1f}°"
-                )
-                self.indice_path += 1
-                return
-
-            # Calculate desired heading to waypoint
-            desired_theta = math.atan2(dy, dx)
             
-            # Normalize angle error to [-π, π]
-            angle_error = desired_theta - self.current_theta
-            angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
+            x_conf, y_conf, theta_conf = self.configurations[self.config_index]
             
-            cmd = Twist()
-            
-            # Drive while making best effort to align (loose tolerance)
-            if abs(angle_error) < 0.3:  # ~17 degrees - allows driving while correcting
-                # Drive toward waypoint
-                cmd.linear.x = min(0.5 * dist, 0.5)  # Cap at 0.5 m/s
-                self.get_logger().info(
-                    f"  ➜ AVANZANDO hacia WP {self.indice_path} ({x_target:.2f}, {y_target:.2f}) | "
-                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}, {math.degrees(self.current_theta):.1f}°) | "
-                    f"Dist: {dist:.2f}m | v={cmd.linear.x:.2f}m/s"
-                )
+            # Determine if this is a rotation or translation
+            if self.config_index > 0:
+                x_prev, y_prev, _ = self.configurations[self.config_index - 1]
+                is_rotation = (abs(x_conf - x_prev) < 1e-6 and abs(y_conf - y_prev) < 1e-6)
             else:
-                # Rotate to face waypoint first (only if misaligned)
-                cmd.angular.z = max(min(angle_error, 0.5), -0.5)  # Proportional rotation, capped
+                is_rotation = False
+            
+            if is_rotation:
+                # ROTATION: Rotate in place to target theta
+                target_rad = math.radians(theta_conf)
+                cmd, completed = calcular_rotacion(self.current_theta, target_rad, tolerancia=0.05)
+                
                 self.get_logger().info(
-                    f"  ⟲ GIRANDO hacia WP {self.indice_path} ({x_target:.2f}, {y_target:.2f}) | "
-                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}, {math.degrees(self.current_theta):.1f}°) | "
-                    f"Error: {math.degrees(angle_error):.1f}° | ω={cmd.angular.z:.2f}rad/s"
+                    f"  ⟲ GIRANDO [config {self.config_index}] -> {theta_conf:.1f}° | "
+                    f"Actual: {math.degrees(self.current_theta):.1f}°"
                 )
-
-            self.cmd_pub.publish(cmd)
+                self.cmd_pub.publish(cmd)
+                
+                if completed:
+                    self.config_index += 1
+            
+            else:
+                # TRANSLATION: Move forward in current heading
+                dx = x_conf - self.current_x
+                dy = y_conf - self.current_y
+                dist = math.sqrt(dx**2 + dy**2)
+                
+                # Tolerance: 20cm
+                if dist < 0.2:
+                    self.get_logger().info(
+                        f"  ✓ Config {self.config_index} reached ({x_conf:.2f}, {y_conf:.2f})"
+                    )
+                    self.config_index += 1
+                    return
+                
+                # Move forward at fixed heading (no correction during motion)
+                cmd = Twist()
+                cmd.linear.x = 0.3  # Fixed velocity, no proportional control
+                
+                self.get_logger().info(
+                    f"  ➜ AVANZANDO [config {self.config_index}] ({x_conf:.2f}, {y_conf:.2f}) | "
+                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}) | Dist: {dist:.2f}m"
+                )
+                self.cmd_pub.publish(cmd)
+            
+            return
+        
+        # ===== STATE: FINALIZANDO (FINAL MEASUREMENTS) =====
+        if self.state == "FINALIZANDO":
+            
+            # Read LiDAR measurements
+            self.d_front_final = self.leer_distancia_direccion('frente')
+            self.d_right_final = self.leer_distancia_direccion('derecha')
+            
+            self.get_logger().info(
+                f"✓ FINALIZANDO: Final measurements:\n"
+                f"  d_front = {self.d_front_final:.3f}m\n"
+                f"  d_right = {self.d_right_final:.3f}m"
+            )
+            
+            # Compute estimates
+            qf_theoretical = self.scene['qf']
+            qf_est = estimate_position_from_odometry(self.x0, self.y0, self.theta0, self.configurations)
+            qact = compute_qact_from_lidar(qf_est[0], qf_est[1], math.radians(qf_est[2]),
+                                          self.d_front_final, self.d_right_final)
+            
+            self.get_logger().info(
+                f"\n{'='*60}\n"
+                f"RESULTADOS FINALES\n"
+                f"{'='*60}\n"
+                f"qf (teórico):  ({qf_theoretical[0]:.4f}, {qf_theoretical[1]:.4f}, {qf_theoretical[2]:.1f}°)\n"
+                f"qf_est (odo):  ({qf_est[0]:.4f}, {qf_est[1]:.4f}, {qf_est[2]:.1f}°)\n"
+                f"qact (sensor): ({qact[0]:.4f}, {qact[1]:.4f}, {qact[2]:.1f}°)\n"
+                f"{'='*60}"
+            )
+            
+            # Save results to file
+            save_path_with_results(self.configurations, self.path_file, qf_est, qact)
+            self.get_logger().info(f"✓ Results appended to {self.path_file}")
+            
+            # Reset state
+            self.state = "IDLE"
+            self.comando_activo = None
+            self.cmd_pub.publish(Twist())
+            
             return
 
 
