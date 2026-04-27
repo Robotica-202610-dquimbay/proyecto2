@@ -419,13 +419,19 @@ class NavigationNode(Node):
                     self.config_index += 1
                     return
                 
-                # Move forward at fixed heading (no correction during motion)
+                # Adaptive velocity: scales with distance but bounded [v_min, v_max]
+                # This slows down near target without infinite loops
+                v_max = 0.3          # Max velocity (far from target)
+                v_min = 0.15         # Min velocity (prevents stuck state)
+                k = 0.5              # Proportional gain
+                
+                # Velocity = k * distance, clamped between v_min and v_max
                 cmd = Twist()
-                cmd.linear.x = 0.3  # Fixed velocity, no proportional control
+                cmd.linear.x = max(v_min, min(v_max, k * dist))
                 
                 self.get_logger().info(
                     f"  ➜ AVANZANDO [config {self.config_index}] ({x_conf:.2f}, {y_conf:.2f}) | "
-                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}) | Dist: {dist:.2f}m"
+                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}) | Dist: {dist:.2f}m | v={cmd.linear.x:.2f}m/s"
                 )
                 self.cmd_pub.publish(cmd)
             
