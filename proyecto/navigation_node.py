@@ -74,8 +74,8 @@ class NavigationNode(Node):
         
         # ===== ODOMETRY FILTERING =====
         # Track last valid position to reject noise spikes
-        self.last_valid_x = 0.0
-        self.last_valid_y = 0.0
+        self.last_valid_x = None  # None = first reading, accept it
+        self.last_valid_y = None
         self.max_jump = 0.5  # Reject jumps > 0.5m as noise
         
         # Final measurements
@@ -97,11 +97,12 @@ class NavigationNode(Node):
         new_x = msg.pose.pose.position.x
         new_y = msg.pose.pose.position.y
         
-        # Filter out noise spikes: reject jumps > max_jump (0.5m)
-        jump = math.sqrt((new_x - self.last_valid_x)**2 + (new_y - self.last_valid_y)**2)
-        if jump > self.max_jump:
-            # Ignore this noisy reading, keep last valid position
-            return
+        # Filter out noise spikes (skip check on first reading)
+        if self.last_valid_x is not None:
+            jump = math.sqrt((new_x - self.last_valid_x)**2 + (new_y - self.last_valid_y)**2)
+            if jump > self.max_jump:
+                # Ignore this noisy reading, keep last valid position
+                return
         
         # Update valid position
         self.current_x = new_x
