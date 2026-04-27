@@ -68,9 +68,17 @@ class NavigationNode(Node):
         self.current_x = msg.pose.pose.position.x
         self.current_y = msg.pose.pose.position.y
         
+        # Correct quaternion to 2D angle extraction for Z-axis rotation
+        # For a quaternion (qx, qy, qz, qw) representing Z-axis rotation:
+        # theta = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy^2 + qz^2))
+        qx = msg.pose.pose.orientation.x
+        qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
-        self.current_theta = 2.0 * math.atan2(qz, qw)
+        
+        # Standard quaternion to 2D angle (Z-axis yaw)
+        self.current_theta = math.atan2(2.0 * (qw * qz + qx * qy), 
+                                        1.0 - 2.0 * (qy * qy + qz * qz))
 
     def lidar_callback(self, msg):
         self.last_scan = msg
@@ -139,14 +147,15 @@ class NavigationNode(Node):
             self.pose_inicial_relativa = True # Lo usamos como bandera de inicio
             self.tiempo_maniobra = 0.0        # Cronómetro en segundos
 
-        # 2. Determinar hacia dónde nos vamos a mover para vigilar ESA dirección
+         # 2. Determinar hacia dónde nos vamos a mover para vigilar ESA dirección
         if abs(distancia_x_metros) >= abs(distancia_y_metros):
             if distancia_x_metros >= 0:
                 # Movimiento hacia el FRENTE
                 cono_despejado = self.leer_distancias_en_rango(-cono_vision, cono_vision)
             else:
-                # Movimiento hacia ATRÁS (El Lidar ROS2 va de -180 a 180, unimos los dos extremos)
-                cono_despejado = self.leer_distancias_en_rango(180-cono_vision, 180) + self.leer_distancias_en_rango(-180, -180+cono_vision)
+                # Movimiento hacia ATRÁS - use negative angles that wrap properly
+                # leer_distancias_en_rango now handles wraparound at ±180°
+                cono_despejado = self.leer_distancias_en_rango(180-cono_vision, 180+cono_vision)
         else:
             if distancia_y_metros > 0:
                 # Movimiento hacia la IZQUIERDA
@@ -346,10 +355,22 @@ class NavigationNode(Node):
                 self.indice_path += 1
                 return
 
-            # Control proporcional simple
+            # Calculate desired heading to waypoint
+            desired_theta = math.atan2(dy, dx)
+            
+            # Normalize angle error to [-π, π]
+            angle_error = desired_theta - self.current_theta
+            angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
+            
             cmd = Twist()
-            cmd.linear.x = 0.5 * dx
-            cmd.linear.y = 0.5 * dy
+            
+            # If robot is well-aligned, drive forward
+            if abs(angle_error) < 0.1:  # ~5.7 degrees
+                # Drive toward waypoint
+                cmd.linear.x = min(0.5 * dist, 0.5)  # Cap at 0.5 m/s
+            else:
+                # Rotate to face waypoint first
+                cmd.angular.z = max(min(angle_error, 0.5), -0.5)  # Proportional rotation, capped
 
             self.cmd_pub.publish(cmd)
             return

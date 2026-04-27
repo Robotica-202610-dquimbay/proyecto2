@@ -81,14 +81,20 @@ def cells_to_waypoints(cell_path: list,
 
 
 def compute_full_path(scene: dict,
-                      classification_map: dict,
-                      cs: float = CELL_SIZE) -> list | None:
+                       classification_map: dict,
+                       cs: float = CELL_SIZE) -> list | None:
     """
     Ejecuta Dijkstra desde q0 hasta qf y devuelve la lista de
     waypoints (x, y) en metros.
+    
+    Robust handling of q0/qf which may be (x,y) or (x,y,theta).
     """
-    x0, y0, _ = scene["q0"]
-    xf, yf, _ = scene["qf"]
+    q0 = scene["q0"]
+    qf = scene["qf"]
+    
+    # Handle both (x, y) and (x, y, theta) formats
+    x0, y0 = q0[0], q0[1]
+    xf, yf = qf[0], qf[1]
     start = world_to_cell(x0, y0, cs)
     goal  = world_to_cell(xf, yf, cs)
     cell_path = dijkstra(start, goal, classification_map)

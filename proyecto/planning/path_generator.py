@@ -9,11 +9,13 @@ def _angle_to(x1: float, y1: float, x2: float, y2: float) -> float:
 
 
 def _normalize_angle(deg: float) -> float:
-    """Normaliza un ángulo a (-180, 180]."""
-    deg = deg % 360.0
-    if deg > 180.0:
-        deg -= 360.0
-    return deg
+    """
+    Normalizes an angle in degrees to the range (-180, 180].
+    Uses atan2-based normalization for robustness.
+    """
+    rad = math.radians(deg)
+    normalized_rad = math.atan2(math.sin(rad), math.cos(rad))
+    return math.degrees(normalized_rad)
 
 
 def waypoints_to_configurations(waypoints: list,

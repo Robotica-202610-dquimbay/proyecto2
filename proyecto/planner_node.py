@@ -4,6 +4,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
 
 import os
+import math
 from ament_index_python.packages import get_package_share_directory
 
 from .planning.scene_loader import load_scene
@@ -58,7 +59,7 @@ class PlannerNode(Node):
         msg.header.frame_id = "map"
         msg.header.stamp = self.get_clock().now().to_msg()
 
-        for (x, y) in waypoints:
+        for i, (x, y) in enumerate(waypoints):
             pose = PoseStamped()
             pose.header.frame_id = "map"
             pose.header.stamp = msg.header.stamp
@@ -67,6 +68,21 @@ class PlannerNode(Node):
             pose.pose.position.y = y
             pose.pose.position.z = 0.0
             
+            # Compute orientation: direction from previous to current waypoint
+            # For first point, use zero orientation
+            if i == 0:
+                theta = 0.0
+            else:
+                x_prev, y_prev = waypoints[i-1]
+                theta = math.atan2(y - y_prev, x - x_prev)
+            
+            # Convert angle to quaternion (Z-axis rotation only)
+            # q = [sin(θ/2), 0, 0, cos(θ/2)] for Z rotation, but standard is [0, 0, sin(θ/2), cos(θ/2)]
+            half_theta = theta / 2.0
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = math.sin(half_theta)
+            pose.pose.orientation.w = math.cos(half_theta)
 
             msg.poses.append(pose)
 
