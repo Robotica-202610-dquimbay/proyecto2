@@ -13,6 +13,9 @@ import os
 import time
 from planning.scene_loader import load_scene
 
+from ament_index_python.packages import get_package_share_directory
+
+
 # Try to import Gazebo services (optional)
 try:
     from gazebo_msgs.srv import SpawnEntity, DeleteEntity
@@ -54,8 +57,8 @@ class GazeboSpawnerNode(Node):
         
         # Make path absolute if needed
         if not os.path.isabs(scene_file):
-            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            scene_file = os.path.join(base_path, scene_file)
+            package_path = get_package_share_directory('proyecto')
+            scene_file = os.path.join(package_path, '..', 'data', f'Escena-Problema{scene_file}.txt')
         
         self.get_logger().info(f'Loading scene: {scene_file}')
         
