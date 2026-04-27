@@ -9,26 +9,44 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Pose, Quaternion, Point, Vector3
 from visualization_msgs.msg import Marker, MarkerArray
-from gazebo_msgs.srv import SpawnEntity, DeleteEntity
 import os
+import time
 from planning.scene_loader import load_scene
+
+# Try to import Gazebo services (optional)
+try:
+    from gazebo_msgs.srv import SpawnEntity, DeleteEntity
+    GAZEBO_AVAILABLE = True
+except ImportError:
+    GAZEBO_AVAILABLE = False
 
 
 class GazeboSpawnerNode(Node):
     def __init__(self):
         super().__init__('gazebo_spawner')
         
-        self.spawn_client = self.create_client(SpawnEntity, '/spawn_entity')
-        self.delete_client = self.create_client(DeleteEntity, '/delete_entity')
+        self.gazebo_ready = False
+        self.spawn_client = None
         
-        # Marker publisher for waypoints
+        # Marker publisher for waypoints (always available)
         self.marker_pub = self.create_publisher(MarkerArray, '/visualization_marker_array', 10)
         
-        # Wait for Gazebo services
-        while not self.spawn_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for spawn_entity service...')
-        
-        self.get_logger().info('✓ Connected to Gazebo spawn service')
+        if GAZEBO_AVAILABLE:
+            self.spawn_client = self.create_client(SpawnEntity, '/spawn_entity')
+            self.get_logger().info('Checking for Gazebo spawn service...')
+            
+            # Wait up to 3 seconds for Gazebo
+            start_time = time.time()
+            while time.time() - start_time < 3.0:
+                if self.spawn_client.wait_for_service(timeout_sec=0.5):
+                    self.gazebo_ready = True
+                    self.get_logger().info('✓ Connected to Gazebo')
+                    break
+            
+            if not self.gazebo_ready:
+                self.get_logger().warn('✗ Gazebo not available - will only publish markers')
+        else:
+            self.get_logger().warn('✗ gazebo_msgs not installed - will only publish markers')
         
         # Get scene file from parameter or default
         self.declare_parameter('scene_file', 'data/Escena-Problema1.txt')
@@ -43,7 +61,8 @@ class GazeboSpawnerNode(Node):
         
         try:
             self.scene = load_scene(scene_file)
-            self.spawn_obstacles()
+            if self.gazebo_ready:
+                self.spawn_obstacles()
             self.publish_waypoints()
         except Exception as e:
             self.get_logger().error(f'Error loading scene: {e}')
@@ -51,6 +70,9 @@ class GazeboSpawnerNode(Node):
     
     def spawn_obstacles(self):
         """Spawn all obstacles from scene file in Gazebo."""
+        if not self.gazebo_ready:
+            return
+        
         for i, obs in enumerate(self.scene['obstacles']):
             x_min, y_min, x_max, y_max = obs
             
@@ -72,6 +94,7 @@ class GazeboSpawnerNode(Node):
             pose.orientation.w = 1.0
             
             # Spawn in Gazebo
+            from gazebo_msgs.srv import SpawnEntity
             req = SpawnEntity.Request()
             req.name = f'obstacle_{i}'
             req.xml = urdf
