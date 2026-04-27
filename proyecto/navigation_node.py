@@ -466,6 +466,10 @@ class NavigationNode(Node):
             self.d_front_final = self.leer_distancia_direccion('frente')
             self.d_right_final = self.leer_distancia_direccion('derecha')
             
+            # Get expected distances from scene
+            d_front_expected = self.scene.get('d_frente', 0.8)
+            d_right_expected = self.scene.get('d_derecha', 0.78)
+            
             self.get_logger().info(
                 f"✓ FINALIZANDO: Final measurements:\n"
                 f"  d_front = {self.d_front_final:.3f}m (expected: {d_front_expected:.3f}m)\n"
@@ -475,10 +479,6 @@ class NavigationNode(Node):
             # Compute estimates
             qf_theoretical = self.scene['qf']
             qf_est = estimate_position_from_odometry(self.x0, self.y0, self.theta0, self.configurations)
-            
-            # Use actual expected distances from scene (d_frente, d_derecha)
-            d_front_expected = self.scene.get('d_frente', 0.8)
-            d_right_expected = self.scene.get('d_derecha', 0.78)
             
             qact = compute_qact_from_lidar(qf_est[0], qf_est[1], math.radians(qf_est[2]),
                                           self.d_front_final, self.d_right_final,
