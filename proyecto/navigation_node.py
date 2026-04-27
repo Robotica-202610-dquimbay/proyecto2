@@ -266,9 +266,7 @@ class NavigationNode(Node):
                     elif opcion == '5':
                         numero = int(input("Número de escena (1-6): "))
                         self.parametros_comando = [numero]
-
-                        # 🔥 aquí activas la máquina de estados
-                        self.estado = "CARGAR_ESCENA"
+                        self.comando_activo = 5
 
                     elif opcion == '0':
                         print("Saliendo...")
@@ -292,8 +290,7 @@ class NavigationNode(Node):
         # =====================================
         if self.comando_activo == 5:
             numero = self.parametros_comando[0]
-
-            self.get_logger().info(f"Cargando escena {numero}...")
+            self.get_logger().info(f"Loading scene {numero}...")
 
             try:
                 from ament_index_python.packages import get_package_share_directory
@@ -302,13 +299,14 @@ class NavigationNode(Node):
                 ruta = os.path.join(package_path, 'data', f'Escena-Problema{numero}.txt')
 
                 self.scene = load_scene(ruta)
+                self.get_logger().info(f"Scene loaded: {len(self.scene['obstacles'])} obstacles")
 
             except Exception as e:
-                self.get_logger().error(f"Error cargando escena: {e}")
+                self.get_logger().error(f"Error loading scene: {e}")
                 self.comando_activo = None
                 return
 
-            self.get_logger().info("Planificando trayectoria...")
+            self.get_logger().info("Planning path...")
 
             try:
                 c_obs = build_c_obstacles(self.scene)
@@ -316,19 +314,19 @@ class NavigationNode(Node):
                 waypoints = compute_full_path(self.scene, cmap)
 
             except Exception as e:
-                self.get_logger().error(f"Error en planificación: {e}")
+                self.get_logger().error(f"Error planning: {e}")
                 self.comando_activo = None
                 return
 
             if waypoints is None:
-                self.get_logger().error("No se encontró camino.")
+                self.get_logger().error("No path found")
                 self.comando_activo = None
                 return
 
             self.path = waypoints
             self.indice_path = 0
 
-            self.get_logger().info(f"Path generado con {len(self.path)} waypoints.")
+            self.get_logger().info(f"Path generated: {len(self.path)} waypoints")
 
             self.comando_activo = 7
             return
@@ -350,8 +348,8 @@ class NavigationNode(Node):
             dy = y_target - self.current_y
             dist = math.sqrt(dx**2 + dy**2)
 
-            # Llegó al waypoint
-            if dist < 0.1:
+            # Waypoint reached (best effort: 20cm tolerance)
+            if dist < 0.2:
                 self.indice_path += 1
                 return
 
@@ -364,12 +362,12 @@ class NavigationNode(Node):
             
             cmd = Twist()
             
-            # If robot is well-aligned, drive forward
-            if abs(angle_error) < 0.1:  # ~5.7 degrees
+            # Drive while making best effort to align (loose tolerance)
+            if abs(angle_error) < 0.3:  # ~17 degrees - allows driving while correcting
                 # Drive toward waypoint
                 cmd.linear.x = min(0.5 * dist, 0.5)  # Cap at 0.5 m/s
             else:
-                # Rotate to face waypoint first
+                # Rotate to face waypoint first (only if misaligned)
                 cmd.angular.z = max(min(angle_error, 0.5), -0.5)  # Proportional rotation, capped
 
             self.cmd_pub.publish(cmd)
