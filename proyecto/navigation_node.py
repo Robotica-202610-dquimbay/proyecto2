@@ -9,6 +9,15 @@ import os
 
 from .logic.lidar import obtener_distancia_angulo, obtener_distancias_rango
 from .logic.movement import calcular_rotacion, calcular_movimiento_relativo
+from nav_msgs.msg import Path
+
+# Utils
+from proyecto.planning.scene_loader import load_scene
+from proyecto.planning.cspace import build_c_obstacles, build_classification_map
+from proyecto.planning.dijkstra import compute_full_path
+
+from ament_index_python.packages import get_package_share_directory
+
 
 class NavigationNode(Node):
     def __init__(self):
@@ -17,6 +26,7 @@ class NavigationNode(Node):
         # Suscriptores
         self.odom_sub = self.create_subscription(Odometry, 'odom', self.odom_callback, 10)
         self.lidar_sub = self.create_subscription(LaserScan, 'scan_raw', self.lidar_callback, 10)
+        self.plan_sub = self.create_subscription(Path, '/plan', self.plan_callback, 10)  # Suscriptor para el planificador global (opcional)
         
         # Publicador
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -26,6 +36,7 @@ class NavigationNode(Node):
         self.current_y = 0.0
         self.current_theta = 0.0
         self.last_scan = None
+        self.estado = "IDLE"
         
         # Memorias de estado para los movimientos relativos
         self.target_theta_relativo = None
@@ -37,6 +48,10 @@ class NavigationNode(Node):
         # Variables para comunicar el menú interactivo con el control loop
         self.comando_activo = None
         self.parametros_comando = []
+
+        # Variables para el planificador
+        self.plan = []
+        self.plan_index = 0
         
         # Timer (El loop de control corre 10 veces por segundo)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -59,6 +74,12 @@ class NavigationNode(Node):
 
     def lidar_callback(self, msg):
         self.last_scan = msg
+
+    # Callback para el planificado
+    def plan_callback(self, msg):
+        self.plan = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        self.plan_index = 0
+        self.get_logger().info(f"Plan recibido con {len(self.plan)} puntos")
 
     # =======================================================
     # WRAPPERS PARA LOS ESTUDIANTES
@@ -159,8 +180,8 @@ class NavigationNode(Node):
         Lee el archivo de la escena indicada y guarda el texto en self.texto_escena.
         """
         # Calculamos la ruta subiendo un nivel de directorio desde este archivo hasta la carpeta 'data'
-        directorio_actual = os.path.dirname(os.path.abspath(__file__))
-        ruta_archivo = os.path.join(directorio_actual, '..', 'data', f'Escena-Problema{numero_escena}.txt')
+        package_path = get_package_share_directory('proyecto')
+        ruta_archivo = os.path.join(package_path, '..', 'data', f'Escena-Problema{numero_escena}.txt')
         
         try:
             with open(ruta_archivo, 'r', encoding='utf-8') as archivo:
@@ -177,105 +198,162 @@ class NavigationNode(Node):
     # BUCLE PRINCIPAL (Área de trabajo del estudiante)
     # =======================================================
     def menu_interactivo(self):
-        """Pide input por consola sin interrumpir la recepción de datos de los sensores."""
         while rclpy.ok():
-            if self.comando_activo is None:
-                print("\n" + "="*35)
+            if self.comando_activo is None and self.estado == "IDLE":
+
+                print("\n" + "="*40)
                 print("--- MENÚ DE NAVEGACIÓN ---")
                 print("1. Leer distancia en un ángulo")
                 print("2. Leer distancias en un rango")
                 print("3. Rotar grados relativos")
-                print("4. Mover relativo a la posición (X, Y)")
-                print("5. Cargar Escena de texto")
-                print("6. Leer distancia por dirección (Frente, Atras, Izquierda, Derecha)")
-                print("="*35)
-                
+                print("4. Mover relativo (X, Y)")
+                print("5. Cargar escena y planificar")
+                print("6. Leer distancia por dirección")
+                print("0. Salir")
+                print("="*40)
+
                 try:
-                    opcion = input("Elige una opción (1-6): ")
-                    
+                    opcion = input("Elige una opción: ")
+
+                    # =====================
+                    # LIDAR
+                    # =====================
                     if opcion == '1':
-                        angulo = float(input("Ingresa el ángulo (en grados): "))
+                        angulo = float(input("Ángulo (grados): "))
                         self.parametros_comando = [angulo]
                         self.comando_activo = 1
-                    
+
                     elif opcion == '2':
-                        ang_min = float(input("Ángulo mínimo (ej. -30): "))
-                        ang_max = float(input("Ángulo máximo (ej. 30): "))
+                        ang_min = float(input("Ángulo mínimo: "))
+                        ang_max = float(input("Ángulo máximo: "))
                         self.parametros_comando = [ang_min, ang_max]
                         self.comando_activo = 2
-                    
+
+                    elif opcion == '6':
+                        direccion = input("Dirección (frente/atras/izquierda/derecha): ").lower()
+                        if direccion in ['frente', 'atras', 'izquierda', 'derecha']:
+                            self.parametros_comando = [direccion]
+                            self.comando_activo = 6
+                        else:
+                            print("Dirección inválida.")
+
+                    # =====================
+                    # MOVIMIENTO MANUAL
+                    # =====================
                     elif opcion == '3':
-                        grados = float(input("¿Cuántos grados quieres rotar? (Positivo=Izq, Negativo=Der): "))
+                        grados = float(input("Grados a rotar: "))
                         self.parametros_comando = [grados]
                         self.comando_activo = 3
-                    
+
                     elif opcion == '4':
-                        x = float(input("Cuánto avanzar en X (Frente/Atrás) [en metros]: "))
-                        y = float(input("Cuánto avanzar en Y (Izquierda/Derecha) [en metros]: "))
+                        x = float(input("Movimiento en X (m): "))
+                        y = float(input("Movimiento en Y (m): "))
                         self.parametros_comando = [x, y]
                         self.comando_activo = 4
 
+                    # =====================
+                    # PLANIFICACIÓN (LO NUEVO)
+                    # =====================
                     elif opcion == '5':
-                        numero = int(input("Ingresa el número de la escena (1-6): "))
+                        numero = int(input("Número de escena (1-6): "))
                         self.parametros_comando = [numero]
-                        self.comando_activo = 5
 
-                    elif opcion == '6':
-                        dir_input = input("¿Qué dirección? (frente, atras, izquierda, derecha): ").strip().lower()
-                        if dir_input in ['frente', 'atras', 'izquierda', 'derecha']:
-                            self.parametros_comando = [dir_input]
-                            self.comando_activo = 6
-                        else:
-                            print("Dirección no válida. Intenta de nuevo.")
-                        
+                        # 🔥 aquí activas la máquina de estados
+                        self.estado = "CARGAR_ESCENA"
+
+                    elif opcion == '0':
+                        print("Saliendo...")
+                        break
+
                     else:
-                        print("Opción no válida. Intenta de nuevo.")
-                        
+                        print("Opción inválida.")
+
                 except ValueError:
-                    print("Por favor, ingresa únicamente números válidos.")
+                    print("Entrada inválida.")
 
     # =======================================================
     # BUCLE PRINCIPAL DE CONTROL
     # =======================================================
     def control_loop(self):
-        # Evitar fallos si no hay datos del sensor todavía
         if self.last_scan is None:
             return
 
-        if self.comando_activo == 1:
-            dist = self.leer_distancia_en_angulo(self.parametros_comando[0])
-            self.get_logger().info(f"Distancia a {self.parametros_comando[0]}°: {dist:.2f} m")
-            self.comando_activo = None
-            
-        elif self.comando_activo == 2:
-            distancias = self.leer_distancias_en_rango(self.parametros_comando[0], self.parametros_comando[1])
-            self.get_logger().info(f"Distancias detectadas: {distancias}")
-            self.comando_activo = None
-            
-        elif self.comando_activo == 3:
-            if self.rotar_relativo(self.parametros_comando[0]):
-                self.get_logger().info("Rotación completada exitosamente.")
-                self.comando_activo = None
-                
-        elif self.comando_activo == 4:
-            estado = self.mover_relativo(self.parametros_comando[0], self.parametros_comando[1])
-            
-            if estado == 'COMPLETADO':
-                self.get_logger().info("Desplazamiento relativo completado.")
-                self.comando_activo = None
-            elif estado == 'BLOQUEADO':
-                self.get_logger().warn("¡Obstáculo detectado! Ruta bloqueada. Abortando movimiento.")
-                self.comando_activo = None
-        
-        elif self.comando_activo == 5:
-            self.cargar_escena(self.parametros_comando[0])
-            self.comando_activo = None
+        # =====================================
+        # COMANDO 5: CARGAR + PLANIFICAR
+        # =====================================
+        if self.comando_activo == 5:
+            numero = self.parametros_comando[0]
 
-        elif self.comando_activo == 6:
-            direccion = self.parametros_comando[0]
-            dist = self.leer_distancia_direccion(direccion)
-            self.get_logger().info(f"Distancia hacia el {direccion.upper()}: {dist:.2f} m")
-            self.comando_activo = None
+            self.get_logger().info(f"Cargando escena {numero}...")
+
+            try:
+                from ament_index_python.packages import get_package_share_directory
+
+                package_path = get_package_share_directory('proyecto')
+                ruta = os.path.join(package_path, 'data', f'Escena-Problema{numero}.txt')
+
+                self.scene = load_scene(ruta)
+
+            except Exception as e:
+                self.get_logger().error(f"Error cargando escena: {e}")
+                self.comando_activo = None
+                return
+
+            self.get_logger().info("Planificando trayectoria...")
+
+            try:
+                c_obs = build_c_obstacles(self.scene)
+                cmap = build_classification_map(self.scene, c_obs)
+                waypoints = compute_full_path(self.scene, cmap)
+
+            except Exception as e:
+                self.get_logger().error(f"Error en planificación: {e}")
+                self.comando_activo = None
+                return
+
+            if waypoints is None:
+                self.get_logger().error("No se encontró camino.")
+                self.comando_activo = None
+                return
+
+            self.path = waypoints
+            self.indice_path = 0
+
+            self.get_logger().info(f"Path generado con {len(self.path)} waypoints.")
+
+            self.comando_activo = 7
+            return
+
+
+        # =====================================
+        # ESTADO 7: EJECUTAR PATH
+        # =====================================
+        elif self.comando_activo == 7:
+            if self.indice_path >= len(self.path):
+                self.get_logger().info("Trayectoria completada.")
+                self.cmd_pub.publish(Twist())  # detener robot
+                self.comando_activo = None
+                return
+
+            x_target, y_target = self.path[self.indice_path]
+
+            dx = x_target - self.current_x
+            dy = y_target - self.current_y
+            dist = math.sqrt(dx**2 + dy**2)
+
+            # Llegó al waypoint
+            if dist < 0.1:
+                self.indice_path += 1
+                return
+
+            # Control proporcional simple
+            cmd = Twist()
+            cmd.linear.x = 0.5 * dx
+            cmd.linear.y = 0.5 * dy
+
+            self.cmd_pub.publish(cmd)
+            return
+
 
 def main(args=None):
     rclpy.init(args=args)
