@@ -28,8 +28,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'navigation = proyecto.navigation_node:main',
-            'spawner = proyecto.gazebo_spawner_node:main',
+            'navigation = proyecto.navigation_node:main'
         ],
     },
 )

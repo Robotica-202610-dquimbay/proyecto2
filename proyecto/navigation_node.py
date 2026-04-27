@@ -337,7 +337,7 @@ class NavigationNode(Node):
         # =====================================
         elif self.comando_activo == 7:
             if self.indice_path >= len(self.path):
-                self.get_logger().info("Trayectoria completada.")
+                self.get_logger().info("✓ Trayectoria completada.")
                 self.cmd_pub.publish(Twist())  # detener robot
                 self.comando_activo = None
                 return
@@ -350,6 +350,11 @@ class NavigationNode(Node):
 
             # Waypoint reached (best effort: 20cm tolerance)
             if dist < 0.2:
+                self.get_logger().info(
+                    f"  ✓ Waypoint {self.indice_path} alcanzado | "
+                    f"Pos: ({self.current_x:.2f}, {self.current_y:.2f}) | "
+                    f"θ: {math.degrees(self.current_theta):.1f}°"
+                )
                 self.indice_path += 1
                 return
 
@@ -366,9 +371,19 @@ class NavigationNode(Node):
             if abs(angle_error) < 0.3:  # ~17 degrees - allows driving while correcting
                 # Drive toward waypoint
                 cmd.linear.x = min(0.5 * dist, 0.5)  # Cap at 0.5 m/s
+                self.get_logger().info(
+                    f"  ➜ AVANZANDO hacia WP {self.indice_path} ({x_target:.2f}, {y_target:.2f}) | "
+                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}, {math.degrees(self.current_theta):.1f}°) | "
+                    f"Dist: {dist:.2f}m | v={cmd.linear.x:.2f}m/s"
+                )
             else:
                 # Rotate to face waypoint first (only if misaligned)
                 cmd.angular.z = max(min(angle_error, 0.5), -0.5)  # Proportional rotation, capped
+                self.get_logger().info(
+                    f"  ⟲ GIRANDO hacia WP {self.indice_path} ({x_target:.2f}, {y_target:.2f}) | "
+                    f"Actual: ({self.current_x:.2f}, {self.current_y:.2f}, {math.degrees(self.current_theta):.1f}°) | "
+                    f"Error: {math.degrees(angle_error):.1f}° | ω={cmd.angular.z:.2f}rad/s"
+                )
 
             self.cmd_pub.publish(cmd)
             return
