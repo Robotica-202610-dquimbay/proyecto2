@@ -345,7 +345,9 @@ class NavigationNode(Node):
                 
                 # Convert waypoints to full configurations with headings
                 self.configurations = waypoints_to_configurations(waypoints, theta0, thetaf)
-                self.config_index = 0
+                # Start at config_index=1 to skip q0 (we assume we're already at start position)
+                # config[0]=q0, config[1]=qrot0-1 (first rotation), config[2]=q1, etc.
+                self.config_index = 1
                 
                 self.get_logger().info(f"  ✓ Path generated: {len(self.configurations)} configurations")
                 
