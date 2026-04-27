@@ -111,16 +111,19 @@ class NavigationNode(Node):
         self.last_valid_y = new_y
         
         # Correct quaternion to 2D angle extraction for Z-axis rotation
-        # For a quaternion (qx, qy, qz, qw) representing Z-axis rotation:
-        # theta = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy^2 + qz^2))
         qx = msg.pose.pose.orientation.x
         qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
         
         # Standard quaternion to 2D angle (Z-axis yaw)
-        self.current_theta = math.atan2(2.0 * (qw * qz + qx * qy), 
-                                        1.0 - 2.0 * (qy * qy + qz * qz))
+        theta_raw = math.atan2(2.0 * (qw * qz + qx * qy), 
+                               1.0 - 2.0 * (qy * qy + qz * qz))
+        
+        # Accept all angle readings - let calcular_rotacion() handle normalization
+        # It uses atan2(sin, cos) which is robust to ±π wrapping
+        self.current_theta = theta_raw
+        self.last_valid_theta = theta_raw
 
     def lidar_callback(self, msg):
         self.last_scan = msg
